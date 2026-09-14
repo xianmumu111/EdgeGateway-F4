@@ -9,14 +9,33 @@
 *.axf
 *.lnp
 *.sct
-*.uvgui.*
 *.bak
+
+# Keil 工程 GUI 布局文件：含本机绝对路径，每台机器都不一样，必须忽略
+*.uvgui.*
+*.uvguix.*
+*.build_log.htm
+*.crf
+*.dep
+*.d
+*.iex
+*.htm
+*.sfr
+
 Output/
 Listings/
 Objects/
 Debug/
 Release/
+
+# Keil 编译输出目录名 = 工程名，不能用 Objects/ 覆盖，单独忽略
 MDK-ARM/Objects/
 MDK-ARM/Listings/
+/nodes/f103_slave/MDK-ARM/F103_ModbusSlave/
+
+# CubeMX 生成的 HAL + CMSIS：68MB，其中 48MB 是 DSP 静态库和例程，永远用不到。
+# 用 CubeMX 打开 .ioc 点 Generate Code 即可完整重建，不需要进版本库。
+/nodes/f103_slave/Drivers/
+
 .vs/
 .vscode/settings.json
