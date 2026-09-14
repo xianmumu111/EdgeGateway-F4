@@ -96,3 +96,26 @@
 - [ ] FreeRTOS 三任务跑通 + 打印栈水位
 - [ ] README 架构图
 - [ ] 投第一批简历（不等这些打勾）
+
+## 2026-09-14 · 从站协议栈打通 + PC 仿真台 + 合入 GitHub
+
+**今天**
+
+- 手写 0x03/0x06 解析 + 异常帧，五道校验全上（帧长 / CRC / 地址 / 参数范围 / 功能码）
+- 修掉整数溢出越界：`(uint32_t)addr + qty`。`addr=0xFFFF qty=9` 攻击用例实测
+  16 位版直接段错误 —— 在板子上就是 HardFault 死机
+- 波特率 115200 → 9600，t3.5 改为按波特率算（35000/9600+1 = 4ms）
+- PC 仿真台固化进工程 `test/`：18 条用例 + 6 个变异测试全捕获
+- 整个工程合入 GitHub（90MB → 216KB，忽略 HAL/CMSIS，保留 .ioc）
+
+**卡点**
+
+- MinGW 的 printf 是 static inline，覆盖不了 → 编译源码要加 `-D_INC_STDIO`
+- bat 必须纯 ASCII，UTF-8 中文会被 cmd 按 GBK 切成乱码命令
+- git push 得用 schannel 后端（openssl 报 unexpected eof）
+
+**明天**
+
+1. 补 t1.5 字符间隔检测（`modbus_rx_byte` 里记 last_byte_tick，超 t1.5 就清 rx_len）
+2. F407 到货后跑验片 7 步
+3. 加 0x10 写多个寄存器（自己写，先在 PC 仿真台补用例）
