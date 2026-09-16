@@ -35,7 +35,12 @@ MDK-ARM/Listings/
 
 # CubeMX 生成的 HAL + CMSIS：68MB，其中 48MB 是 DSP 静态库和例程，永远用不到。
 # 用 CubeMX 打开 .ioc 点 Generate Code 即可完整重建，不需要进版本库。
+# ⚠️ 每新建一个节点工程，都要在这里补一条，否则 57MB 直接进版本库。
 /nodes/f103_slave/Drivers/
+/nodes/f407_gateway/Drivers/
+
+# Keil 编译输出目录名 = 工程名（f407_gateway），通用规则覆盖不到
+/nodes/f407_gateway/MDK-ARM/f407_gateway/
 
 .vs/
 .vscode/settings.json
