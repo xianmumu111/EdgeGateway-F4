@@ -8,7 +8,7 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 set CFLAGS=-Wall -Wextra -std=c11 -O2 -finput-charset=UTF-8 -I..\Drivers\ringbuf -I..\Drivers\crc16 -I..\Drivers\modbus
-set DRV=..\Drivers\ringbuf\ringbuf.c ..\Drivers\crc16\crc16.c ..\Drivers\modbus\modbus_rtu.c
+set DRV=..\Drivers\ringbuf\ringbuf.c ..\Drivers\crc16\crc16.c ..\Drivers\modbus\modbus_rtu.c ..\Drivers\modbus\mb_master.c
 set FAILED=0
 
 for %%f in (test_*.c) do (

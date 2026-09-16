@@ -119,3 +119,26 @@
 1. 补 t1.5 字符间隔检测（`modbus_rx_byte` 里记 last_byte_tick，超 t1.5 就清 rx_len）
 2. F407 到货后跑验片 7 步
 3. 加 0x10 写多个寄存器（自己写，先在 PC 仿真台补用例）
+
+## 2026-09-15 · 探索者到货验片：Flash 全片 + 三颗外设芯片全过，判定「好片」
+
+**今天**
+
+- Flash 全片测试真机跑通（`f4_flash_test`）：Sector 5~11 / 896KB / `fail=0` / 9755ms
+- 自己用 CubeMX 建了 F407 HAL 工程 `f407_gateway`，
+  SYS 选了 **Serial Wire**（保住 PB3/PB4 给 SPI1，选 JTAG 会废掉 W25Q128）
+- 板级体检程序一次烧通：
+  - W25Q128 JEDEC ID = `EF 40 18`（Winbond 16MB）
+  - W25Q128 Unique ID = `D2657048271D1C26` —— 非全 00/FF，**真硅片不是白片**
+  - 24C02 写读比对 OK（`A5 3C 5A C3`，测前备份测后写回，无损）
+  - MPU6050 WHO_AM_I = `0x68`
+  - → `RESULT : ALL OK -> GOOD BOARD`
+- 时钟从 HSI 换到 **HSE 8MHz + PLL**（PLLM=8/N=336/P=2/Q=7 → 168/168/42/84M）
+
+**卡点**
+
+（TODO）
+
+**明天**
+
+（TODO）
