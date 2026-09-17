@@ -52,6 +52,7 @@
 static uint8_t g_req[8];
 static uint8_t g_rsp[256];
 static uint16_t g_out[8];
+static uint8_t g_step = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -131,50 +132,89 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  uint16_t req_len, rsp_len, out_n;
-	  uint8_t exc = 0;
-	  mb_m_err_t e;
-	  /* ---- 1) 组帧：读从站 0x01，起始寄存器 0x0000，读 2 个 ---- */
-	  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 0x0000, 2);
-	  if (req_len == 0)
+	uint16_t req_len = 0, rsp_len = 0, out_n = 0;
+	uint8_t exc = 0;
+	uint32_t time_start = 0, time_end = 0;
+	mb_m_err_t e;
+	  /* ---- 1) 组帧：按 g_step 决定这一步干什么 ---- */
+	  switch(g_step)
 	  {
-		uprintf("build_read failed\r\n");
-        HAL_Delay(1000);
-        continue;
+		  case 0:
+		  {
+			  uprintf("[S0] read  slave=01 start=0   qty=2\r\n");
+			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 0, 2);
+			  break;
+		  }
+		  case 1:
+		  {
+			  uprintf("[S1] write slave=01 addr=4    val=0x037F\r\n");
+			  req_len = mb_master_build_write_single(g_req, sizeof(g_req), 0x01, 4, 0x037F);
+			  break;
+		  }
+		  case 2:
+		  {
+			  uprintf("[S2] read  slave=01 start=4   qty=1\r\n");
+			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 4, 1);
+			  break;
+		  }
+		  case 3:
+		  {
+			  uprintf("[S3] read  slave=01 start=200 qty=1\r\n");
+			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 200, 1);
+			  break;
+		  }
+		  case 4:
+		  {
+			  uprintf("[S4] read  slave=02 start=0   qty=1\r\n");
+			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x02, 0, 1);
+			  break;
+		  }
+		  default:
+			  g_step = 0;
+			  continue;
 	  }
-	  
-	  uprintf("TX:");
-	  for(uint16_t i = 0; i < req_len; i++)
-	  uprintf("%02x",g_req[i]);
-	  uprintf("\r\n");
-	  
-	  /* ---- 2) 收发：只负责把请求发出去、把响应收回来 ---- */
-	  rsp_len = 0;
-	  e = mb_port_transfer(g_req, req_len, g_rsp, sizeof(g_rsp), &rsp_len, 200);
-	  if (e != MB_M_OK)
+	  if(req_len == 0)
+		  uprintf("[S%u] build failed\r\n", g_step);
+	  else
 	  {
-		uprintf("port err: %s\r\n", mb_m_err_str(e));
-        HAL_Delay(1000);
-        continue;
+		  /* ---- TX 回显 ---- */
+		  uprintf("[S%u] TX:", g_step);
+		  for(uint16_t i = 0; i< req_len; i++)
+				uprintf("%02X",g_req[i]);
+		  /* ---- 2) 收发 + 计时 ---- */
+		  time_start = HAL_GetTick();
+		  e = mb_port_transfer(g_req, req_len, g_rsp, sizeof(g_rsp), &rsp_len, 200);
+		  time_end = HAL_GetTick() - time_start;
+		  /* ---- 3) 解析 + 打印 ---- */
+		  if(e != MB_M_OK)
+			  /* 收发就失败：超时 / 缓冲不够 / 参数错 */
+            uprintf("[S%u] %s  %lums\r\n", g_step, mb_m_err_str(e), time_end);
+		  else
+		  {
+			  uprintf("[S%u] RX:", g_step);
+			  for(uint16_t i = 0; i < rsp_len; i++)
+					uprintf("%02X",g_rsp[i]);
+			  uprintf("\r\n");
+			  
+			  e = mb_master_parse(g_req, req_len, g_rsp, rsp_len, g_out, sizeof(g_out) / sizeof(g_out[0]), &out_n, &exc);
+			   
+			  if (e == MB_M_OK) {
+                uprintf("[S%u] OK  %lums    ", g_step, time_end);
+                for (uint16_t i = 0; i < out_n; i++) {
+                    uprintf("reg[%u]=%u ", i, g_out[i]);
+                }
+                uprintf("\r\n");
+            } else if (e == MB_M_EXCEPTION) {
+                uprintf("[S%u] EXC %lums    slave exception: 0x%02X\r\n",
+                        g_step, time_end, exc);
+            } else {
+                uprintf("[S%u] %s  %lums\r\n", g_step, mb_m_err_str(e), time_end);
+            }
+		  }
 	  }
-	  uprintf("RX:");
-      for (uint16_t i = 0; i < rsp_len; i++) uprintf(" %02X", g_rsp[i]);
-      uprintf("\r\n");
-	  
-	  /* ---- 3) 解析：校验 + 提取寄存器 ---- */
-	  out_n = 0;
-	  e = mb_master_parse(g_req, req_len, g_rsp, rsp_len, g_out, sizeof(g_out) / sizeof(g_out[0]), &out_n, &exc);
-	  if (e == MB_M_OK) {
-        for (uint16_t i = 0; i < out_n; i++) {
-            uprintf("reg[%u] = %u\r\n", i, g_out[i]);
-        }
-    } else if (e == MB_M_EXCEPTION) {
-        uprintf("slave exception: 0x%02X\r\n", exc);
-    } else {
-        uprintf("parse err: %s\r\n", mb_m_err_str(e));
-    }
-	HAL_Delay(1000);
-	
+	  /* ---- 4) 下一轮 ---- */
+	  g_step = (uint8_t)((g_step + 1u) % 5u);
+      HAL_Delay(500);
   }
   /* USER CODE END 3 */
 }
