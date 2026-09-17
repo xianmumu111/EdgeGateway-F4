@@ -12,6 +12,7 @@
  
  #include "mb_port_f4.h"
  #include "main.h"
+ #include "ringbuf.h"
  
  /* CubeMX 生成的 UART 句柄（main.c 里定义，这里 extern 引用） */
  extern UART_HandleTypeDef huart2;
@@ -21,6 +22,81 @@
  
  #define RS485_TX() HAL_GPIO_WritePin(RS485_DE_PORT, RS485_DE_PIN, GPIO_PIN_SET)
  #define RS485_RX() HAL_GPIO_WritePin(RS485_DE_PORT, RS485_DE_PIN, GPIO_PIN_RESET)
+ 
+ // 1) DMA 落地缓冲：一次 ReceiveToIdle 最多搬这么多
+ #define MB_PORT_DMA_BUF_SZ 128
+ static uint8_t s_dma_buf[MB_PORT_DMA_BUF_SZ];
+ 
+ // 2) ringbuf 存储：2 的幂，且 >= 2 × DMA_BUF_SZ
+RB_STATIC_DEFINE(s_rx_rb, 256);
+
+ /*
+ * 作用：初始化modbus_port
+ *
+ * 参数：无
+ *
+ * 返回值：无
+ */
+ void mb_port_init(void)
+ {
+	 RS485_RX();
+	 // 启动 UART2 DMA 空闲接收，缓冲区 s_dma_buf，大小 MB_DMA_SIZE
+	 HAL_UARTEx_ReceiveToIdle_DMA(&huart2,s_dma_buf,MB_PORT_DMA_BUF_SZ);
+	 // 关闭 DMA 半传输中断，避免搬到一半就触发回调干扰正常收包
+	 __HAL_DMA_DISABLE_IT(huart2.hdmarx,DMA_IT_HT);
+ }
+ 
+ /*
+ * 作用：UART 空闲事件回调。当 DMA 接收因空闲中断或缓冲区满而结束时，
+ *       把本次 DMA 收到的字节推入环形缓冲，然后重启 DMA 接收，
+ *       并再次关闭半传输中断，防止帧被 HT 中断切碎。
+ *
+ * 参数：huart —— UART 句柄，用于判断是否为 USART2
+ *       Size  —— 本次 DMA 接收到的字节数
+ *
+ * 返回值：无
+ */
+ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+ {
+	 if(huart ->Instance != USART2) return;
+	 
+	 /* TODO 1: 把这批字节推进环形缓冲（rb_write 返回实际写入数，可不管） */
+	 rb_write(&s_rx_rb,s_dma_buf,Size);
+	 
+	 /* TODO 2: 重启 DMA 接收（Mode=Normal，跑完一轮就停） */
+	 HAL_UARTEx_ReceiveToIdle_DMA(&huart2,s_dma_buf,MB_PORT_DMA_BUF_SZ);
+	 
+	 /* TODO 3: 再关一次半传输中断 —— 每次 HAL_DMA_Start_IT 都会重新打开 HT */
+	 __HAL_DMA_DISABLE_IT(huart2.hdmarx,DMA_IT_HT); 
+ }
+ 
+ /*
+ * 作用：从环形缓冲取 n 字节到 dst。在 timeout_ms 内凑齐 n 字节返回 1，
+ *       超时仍未凑齐返回 0。内部循环调用 rb_read，因为调用那一刻缓冲里
+ *       可能只有部分字节，一次 rb_read 不一定能读满。
+ *
+ * 参数：dst        —— 目标缓冲区，用于存放读出的字节
+ *       n          —— 需要读取的字节数
+ *       timeout_ms —— 超时时间，单位毫秒
+ *
+ * 返回值：1 —— 成功凑齐 n 字节
+ *         0 —— 超时，未凑齐 n 字节
+ */
+ static int rb_take(uint8_t *dst, uint16_t n, uint32_t timeout_ms)
+ {
+	 uint32_t time_bigen = HAL_GetTick();
+	 uint16_t got = 0;
+	 
+	 while(got < n)
+	 {
+		 got += rb_read(&s_rx_rb, dst + got, (uint16_t)(n - got));
+		 if(got >= n) return 1;
+		 if((HAL_GetTick() - time_bigen) >= timeout_ms) return 0;
+	 }
+	 return 1;
+ }
+ 
+ 
  
  /*
  * 作用：
@@ -46,6 +122,12 @@
 	 /* ---- 0) 参数检查 ---- */
 	 if(!req || !rsp || !rsp_len || req_len == 0 ||rsp_max < 3)
 		 return MB_M_BAD_ARG;
+	 /* ---- 4 之前：丢弃上一轮残留字节 ----
+     * S4 那步从站不回，但 DMA 一直在跑——万一从站晚到、或线路上有噪声，
+     * 这些字节会留在缓冲里，把下一帧整体顶错位，症状是“偶尔 CRC 错”。
+     * rb_flush 只允许消费者调用，这里在主循环上下文，合法。
+     */
+	 rb_flush(&s_rx_rb);
 	 
 	 /* ---- 1) DE 拉高：切到发送 ---- */
 	 RS485_TX();
@@ -63,37 +145,39 @@
      */
 	 RS485_RX();
 	 
-	 /* ---- 4) 先收 3 个字节（地址 + 功能码 + 第 3 字节） ----
-     * 这是整个函数的灵魂：3 字节足够 mb_master_rsp_len 判断
-     *   正常帧（功能码回显）还是异常帧（功能码最高位置 1），
-     * 从而算出精确总长，避免"一次收 9 字节 + 从站只回 5 字节 → 卡满超时"。
+     /* ---- 4) 先收 3 个字节（地址 + 功能码 + 第 3 字节） ----
+     * 3 字节足够 mb_master_rsp_len 判断正常帧还是异常帧，
+     * 从而算出精确总长，避免“一次收 9 字节 + 从站只回 5 字节 → 卡满超时”。
+     * 改用 rb_take：内部循环从环形缓冲取，凑齐 3 字节或超时才返回。
      */
-	 if(HAL_UART_Receive(&huart2, rsp, 3, timeout_ms) != HAL_OK)
+	 if(!rb_take(rsp, 3, timeout_ms))
 		 return MB_M_TIMEOUT;
 	 
 	 /* ---- 5) 用协议层算总长 ---- */
-	 uint16_t tota1 = mb_master_rsp_len(req, req_len, rsp, 3);
-	 if(tota1 == 0)
+	 uint16_t total = mb_master_rsp_len(req, req_len, rsp, 3);
+	 if(total == 0)
 	 {
 		 /* 功能码不认识 / req 太短 / head 不够 —— 当超时处理 */
 		 return MB_M_TIMEOUT;
 	 }
 	 
 	 /* ---- 6) 收剩余 total - 3 字节 ---- */
-	 if(tota1 > rsp_max)
+	 if(total > rsp_max)
 	 return MB_M_NO_SPACE;
 	 
-	 if(tota1 > 3)
+	 if(total > 3)
 	 {
 		 /* 注意：timeout 是整段剩余字节的总超时，不是字节间超时。
          * 9600bps 下每字节 ≈ 1.04ms，最多再收 252 字节 ≈ 262ms，
          * 上层调用时给 200ms 起就够日常的 0x03/0x06 帧。
          */
-		 if(HAL_UART_Receive(&huart2,rsp + 3, (uint16_t)(tota1 - 3), timeout_ms) != HAL_OK)
+		 if(!rb_take(rsp + 3,total - 3, timeout_ms))
 			return MB_M_TIMEOUT; 
 	 }
 	 /* ---- 7) 回填长度 ---- */
-	 *rsp_len = tota1;
+	 *rsp_len = total;
 	 return MB_M_OK;
  }
+ 
+
  

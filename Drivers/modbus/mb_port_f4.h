@@ -28,6 +28,7 @@ extern "C" {
 mb_m_err_t mb_port_transfer(const uint8_t *req, uint16_t req_len,
                             uint8_t *rsp, uint16_t rsp_max, uint16_t *rsp_len,
                             uint32_t timeout_ms);
+void mb_port_init(void);
 
 #ifdef __cplusplus
 }
