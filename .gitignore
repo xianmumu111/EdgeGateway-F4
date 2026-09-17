@@ -14,6 +14,9 @@
 # Keil 工程 GUI 布局文件：含本机绝对路径，每台机器都不一样，必须忽略
 *.uvgui.*
 *.uvguix.*
+# .uvoptx = 调试配置（断点/Flash算法），同样含本机路径，且每次调试后都会变。
+# 忽略后 Keil 打开工程会自动重建，代价只是要重选一次 Flash 下载算法。
+*.uvoptx
 *.build_log.htm
 *.crf
 *.dep
