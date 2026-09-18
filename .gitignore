@@ -42,6 +42,11 @@ MDK-ARM/Listings/
 /nodes/f103_slave/Drivers/
 /nodes/f407_gateway/Drivers/
 
+# CubeMX 生成的 Middleware（勾选 FREERTOS 后出现 Middlewares/Third_Party/FreeRTOS）。
+# 源码由 CubeMX Repository 复制而来，Generate 即可重建，不需要进版本库。
+# ⚠️ 注意：保留 .ioc 里勾选状态即可，clone 后 Generate Code 会重新生成。
+/nodes/f407_gateway/Middlewares/
+
 # Keil 编译输出目录名 = 工程名（f407_gateway），通用规则覆盖不到
 /nodes/f407_gateway/MDK-ARM/f407_gateway/
 
