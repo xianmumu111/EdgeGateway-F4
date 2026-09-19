@@ -122,17 +122,54 @@ CubeMX  regenerate 时这些块会被保留，写在外面会被冲掉。
 
 ### 4.2 全局（`USER CODE BEGIN Variables`）
 
-```c
-typedef struct { /* ... mb_sample_t，见第 3 节 ... */ } mb_sample_t;
+⚠️ 上一版这里写了 `typedef struct { /* ...见第 3 节... */ } mb_sample_t;` ——
+那个注释是**占位符不是代码**，照抄会拿到空结构体。下面是拼好的完整版，直接用：
 
-static osMessageQueueId_t qSample = NULL;
-static uint32_t g_dropped = 0;      /* 队列满被丢掉的条数 */
+```c
+typedef struct {
+    uint8_t    step;      /* 第几步（0~4） */
+    uint8_t    slave;     /* 从站地址 */
+    uint16_t   addr;      /* 本次访问的起始寄存器地址 */
+    mb_m_err_t err;       /* MB_M_OK / MB_M_EXCEPTION / MB_M_TIMEOUT ... */
+    uint8_t    exc;       /* 从站异常码，仅 err == MB_M_EXCEPTION 时有效 */
+    uint32_t   ms;        /* 本步耗时 */
+    uint8_t    tx_len;    /* 实际发出的字节数 */
+    uint8_t    rx_len;    /* 实际收到的字节数 */
+    uint8_t    tx[8];     /* 请求帧（0x03/0x06 都是固定 8 字节） */
+    uint8_t    rx[16];    /* 响应帧（最长的一帧 CPU 所需，够用） */
+    uint16_t   n;         /* 解析出的寄存器个数 */
+    uint16_t   val[8];    /* 解析出的寄存器值（已转本机字节序） */
+} mb_sample_t;
+
+static osMessageQueueId_t s_q_sample = NULL;   /* 队列句柄 = "票号"，不是队列本体 */
+static uint32_t           s_dropped  = 0;      /* 队列满被丢掉的条数 */
 ```
+
+命名说明：`s_` = 文件内静态变量，跟你 `mb_port_f4.c` 里的 `s_rx_rb` 一个约定。
 
 ### 4.3 uprintf（`USER CODE BEGIN 0`）
 
-从 `main.c.bak` 里把 `uprintf` 整段搬过来（`stdarg + vsnprintf + HAL_UART_Transmit`）。
-**删掉 main.c 里那份**，避免两份实现。
+从 `main.c.bak` 里把 `uprintf` **整段**搬过来。**然后删掉 main.c 里那份**，避免两份实现。
+
+```c
+static void uprintf(const char *fmt, ...)
+{
+    char    buf[128];
+    va_list ap;
+    int     n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    if (n > 0) {
+        if (n > (int)sizeof(buf)) {
+            n = (int)sizeof(buf);   /* vsnprintf 返回"想写的长度"，截断时 clamp */
+        }
+        HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+    }
+}
+```
 
 > 取舍：也可以新建 `log.c/log.h` 做成模块。今天先放 `freertos.c` 里，
 > 少一个文件就少一次改 Keil 工程组；等 MQTT 任务也要打印时再抽出去。
@@ -140,46 +177,123 @@ static uint32_t g_dropped = 0;      /* 队列满被丢掉的条数 */
 ### 4.4 队列创建（`MX_FREERTOS_Init` 的 `USER CODE BEGIN Init` 块）
 
 ```c
-qSample = osMessageQueueNew(8U, sizeof(mb_sample_t), NULL);
+s_q_sample = osMessageQueueNew(8U, sizeof(mb_sample_t), NULL);
 
-/* TODO-9: 返回值为什么要判空？创建失败你怎么让人知道？ */
+/* TODO-9: 上面为什么必须判空？创建失败你怎么让人知道？
+   提示：osMessageQueueNew 从 FreeRTOS 堆上分配，
+         configTOTAL_HEAP_SIZE 不够、或任务在难啃时被提前调用，都会返回 NULL。
+         句柄是 NULL 时 Put/Get 的行为你知道是什么吗？ */
 ```
 
-### 4.5 采集任务
+### 4.5 采集任务 StartTaskModbus
+
+#### 先看清「旧的 → 新的」映射关系
+
+同一个活，以前在 `main.c` 里做，现在要在任务里做，**变量全部从全局 `g_xxx` 换成结构体成员 `s.xxx`**：
+
+| main.c.bak 里（旧） | freertos.c 里（新） |
+|---|---|
+| `g_req[8]` 请求帧 | `s.tx[8]` |
+| `req_len` | `s.tx_len` |
+| `g_rsp[256]` 响应帧 | `s.rx[16]`（够长即可，不必 256） |
+| `rsp_len` | `s.rx_len` |
+| `g_out[8]` / `out_n` | `s.val[8]` / `s.n` |
+| `g_step` | `s.step` + 局部 `step` |
+| `HAL_GetTick()` 算出的耗时 | `s.ms` |
+| `mb_m_err_t e` / `exc` | `s.err` / `s.exc` |
+| **`uprintf(...)` 全部删掉** | 一个都不留，全搬到 taskReport |
+
+#### 骨架（case 0 给全了当样板，case 1~4 你自己照着填）
 
 ```c
 void StartTaskModbus(void *argument)
 {
     (void)argument;
     uint8_t  step = 0;
-    uint8_t  req[8];
-    uint8_t  rsp[256];
-    uint16_t out[8];
 
     mb_port_init();     /* ⚠️ 只在这里调一次。main.c 里那句删掉 */
 
     for (;;)
     {
         mb_sample_t s;
+        uint16_t    req_len, rsp_len, out_n;
+        uint16_t    out[8];
+        uint8_t     exc;
+        mb_m_err_t  e;
+        uint32_t    t0;
 
         memset(&s, 0, sizeof(s));
         /* TODO-1: 为什么要 memset？不清零会出什么事？
-           提示：tx/rx/val 是定长数组，本帧只填了前几个字节 */
+           提示：tx/rx/val 是**定长**数组，本帧只填前几个字节，
+                 队列是值拷贝，剩下的脏字节会被原样送给上报任务。 */
 
-        s.step = step;
+        s.step = (uint8_t)step;
 
-        /* TODO-2: 按 step 组帧。逻辑从 main.c.bak 的 switch(g_step) 搬过来，
-           但只做两件事：填 s.slave / s.addr，把帧填进 s.tx 并记 s.tx_len。
-           不在这里打印。 */
+        /* ---- 组帧：case 0 是样板，case 1~4 照着填 ---- */
+        switch (step)
+        {
+            case 0:                                     /* 读 slave=01 的 reg0 开始 2 个 */
+                s.slave = 0x01;
+                s.addr  = 0;
+                req_len = mb_master_build_read(s.tx, sizeof(s.tx), s.slave, s.addr, 2);
+                break;
 
-        /* TODO-3: 计时 + mb_port_transfer + mb_master_parse。
-           err / exc / ms / rx / rx_len / n / val 全部填进 s。
-           计时用 HAL_GetTick()（现在由 TIM6 供时基，仍然准）。 */
+            case 1:                                     /* 写 slave=01 的 reg4 = 0x037F */
+                /* TODO-2a: 照抄 case 0 的三行，改成 build_write_single。
+                   函数签名见 mb_master.h:107 */
+                break;
 
-        /* TODO-4: 入队。
-           if (osMessageQueuePut(qSample, &s, 0U, 0U) != osOK) { g_dropped++; }
-           为什么超时写 0（不等）而不是 osWaitForever？
-           提示：采集任务有时间纪律，宁可丢一条也不能卡死整条总线轮询。 */
+            case 2:                                     /* 读回 slave=01 的 reg4 */
+                /* TODO-2b: start=4, qty=1 */
+                break;
+
+            case 3:                                     /* 读 slave=01 的 reg200（越界，要异常帧） */
+                /* TODO-2c: start=200, qty=1 */
+                break;
+
+            case 4:                                     /* 读根本不存在的 slave=02（要超时） */
+                /* TODO-2d: slave=0x02, start=0, qty=1 */
+                break;
+
+            default:
+                step = 0;
+                continue;
+        }
+        s.tx_len = (uint8_t)req_len;
+
+        /* ---- 收发 + 计时 ---- */
+        t0    = HAL_GetTick();
+        e     = mb_port_transfer(s.tx, s.tx_len, s.rx, sizeof(s.rx), &rsp_len, 200);
+        s.ms     = HAL_GetTick() - t0;
+        s.rx_len = (uint8_t)rsp_len;
+        /* TODO-3: 超时（e == MB_M_TIMEOUT）时 rsp_len 是多少？
+                   这时候 s.rx_len 有意义吗？上报任务会不会打印出一串垃圾？
+                   想清楚再去写上报任务。 */
+
+        /* ---- 解析：只有收发 OK 才有东西可解析 ---- */
+        if (e == MB_M_OK) {
+            uint16_t i;
+            e = mb_master_parse(s.tx, s.tx_len, s.rx, s.rx_len,
+                                out, sizeof(out) / sizeof(out[0]), &out_n, &exc);
+            if (e == MB_M_OK) {
+                for (i = 0; i < out_n; i++) {
+                    s.val[i] = out[i];
+                }
+                s.n = out_n;
+            }
+            s.exc = exc;
+        }
+        s.err = e;
+
+        /* ---- 入队 ---- */
+        if (s_q_sample != NULL) {
+            if (osMessageQueuePut(s_q_sample, &s, 0U, 0U) != osOK) {
+                s_dropped++;
+            }
+        }
+        /* TODO-4: 上面为什么用 timeout=0（不等）而不是 osWaitForever？
+           提示：采集任务有**时间纪律** —— 宁可丢一条采样，
+                 也不能让整条 RS485 轮询卡死在等待上。 */
 
         step = (uint8_t)((step + 1u) % 5u);
         osDelay(500);
@@ -187,7 +301,7 @@ void StartTaskModbus(void *argument)
 }
 ```
 
-### 4.6 上报任务
+### 4.6 上报任务 StartTaskReport
 
 ```c
 void StartTaskReport(void *argument)
@@ -197,12 +311,27 @@ void StartTaskReport(void *argument)
 
     for (;;)
     {
-        /* TODO-5: osMessageQueueGet(qSample, &s, NULL, osWaitForever) */
+        if (s_q_sample == NULL) { osDelay(100); continue; }
 
-        /* TODO-6: 打印。格式沿用 main.c.bak，两点改动：
-           (a) 前缀统一成 [RPT][S%d]
-           (b) TX 字节之间补空格 —— 昨天那个小瑕疵顺手修掉
-               期望：[RPT][S0] TX: 01 03 00 00 00 02 C4 0B */
+        /* 队列空时阻塞在这里，CPU 让给别的任务 —— 这就是不用轮询等待的原因 */
+        if (osMessageQueueGet(s_q_sample, &s, NULL, osWaitForever) != osOK) {
+            continue;
+        }
+
+        /* TODO-5: 打印本次 step 的标题行。从 main.c.bak 的五句 uprintf 搬过来，
+           例如 step 0 那句 "[S0] read  slave=01 start=0   qty=2"
+           → 改成 "[RPT][S0] read  slave=01 start=0   qty=2" */
+
+        /* ---- TX 回显：把 s.tx 的前 s.tx_len 个字节打出来 ---- */
+        uprintf("[RPT][S%u] TX:", s.step);
+        /* TODO-6a: for 循环打印 s.tx[0..s.tx_len)，
+           每个字节 "%02X " —— 注意 %02X **后面带空格**，修掉昨天那个小瑕疵 */
+
+        /* TODO-6b: 按 s.err 分三种情况打印，格式沿用 main.c.bak：
+              s.err == MB_M_OK         → 打 RX 字节 + "OK  %lums" + reg[i]=值
+              s.err == MB_M_EXCEPTION  → 打 RX 字节 + "EXC %lums" + "slave exception: 0x%02X"
+              其它（TIMEOUT / CRC...） → 打 mb_m_err_str(s.err) + "%lums"
+           想清楚：超时那一行能不能打 RX 字节？（回看 TODO-3） */
 
         /* TODO-7: 留一行注释占位：
            "CP2: MQTT publish 就写在这里 —— 采集侧一个字都不用改"
@@ -211,7 +340,7 @@ void StartTaskReport(void *argument)
 }
 ```
 
-### 4.7 LED 心跳
+### 4.7 LED 心跳（这个没得思考，直接写）
 
 ```c
 void StartTaskLed(void *argument)
@@ -219,14 +348,14 @@ void StartTaskLed(void *argument)
     (void)argument;
     for (;;)
     {
-        /* TODO-8: HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_10);  osDelay(500);
-           绿灯 PF10（低电平点亮）。
-           思考：为什么要单独开一个任务干这事？
-           答：它是"调度器还活着"的肉眼证据 —— 
-           哪天程序卡死在某个阻塞调用里，灯就停了，一眼看出来。 */
+        HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_10);   /* 绿灯 PF10，低电平点亮 */
+        osDelay(500);
     }
 }
 ```
+
+> 为什么单独开一个任务干这事？它是「调度器还活着」的肉眼证据 ——
+> 哪天程序卡死在某个阻塞调用里，灯就停了，一眼看出来。
 
 ### 4.8 栈溢出钩子
 

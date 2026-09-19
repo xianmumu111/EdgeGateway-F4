@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "dma.h"
 #include "i2c.h"
 #include "spi.h"
@@ -50,14 +51,12 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static uint8_t g_req[8];
-static uint8_t g_rsp[256];
-static uint16_t g_out[8];
-static uint8_t g_step = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -65,28 +64,6 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-
-/* 极简串口打印：stdarg + vsnprintf + HAL_UART_Transmit
- * 不走 printf/semihosting，避免没勾 MicroLIB 时卡死。
- * 调试口 = huart1（USART1）。
- */
- 
- static void uprintf(const char *fmt,...)
- {
-	 char buf[128];
-	 va_list ap;
-	 int n;
-	 va_start(ap, fmt);
-     n = vsnprintf(buf, sizeof(buf), fmt, ap);
-     va_end(ap);
-
-     if (n > 0) {
-        if (n > (int)sizeof(buf)) {
-            n = (int)sizeof(buf);   /* 截断时 vsnprintf 返回"想写的长度"，clamp 一下 */
-        }
-        HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
-    }
- }
 /* USER CODE END 0 */
 
 /**
@@ -125,8 +102,16 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   mb_port_init();
-	uprintf("\r\n=== Modbus RTU master @ STM32F4 ===\r\n");
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -135,89 +120,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	uint16_t req_len = 0, rsp_len = 0, out_n = 0;
-	uint8_t exc = 0;
-	uint32_t time_start = 0, time_end = 0;
-	mb_m_err_t e;
-	  /* ---- 1) 组帧：按 g_step 决定这一步干什么 ---- */
-	  switch(g_step)
-	  {
-		  case 0:
-		  {
-			  uprintf("[S0] read  slave=01 start=0   qty=2\r\n");
-			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 0, 2);
-			  break;
-		  }
-		  case 1:
-		  {
-			  uprintf("[S1] write slave=01 addr=4    val=0x037F\r\n");
-			  req_len = mb_master_build_write_single(g_req, sizeof(g_req), 0x01, 4, 0x037F);
-			  break;
-		  }
-		  case 2:
-		  {
-			  uprintf("[S2] read  slave=01 start=4   qty=1\r\n");
-			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 4, 1);
-			  break;
-		  }
-		  case 3:
-		  {
-			  uprintf("[S3] read  slave=01 start=200 qty=1\r\n");
-			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x01, 200, 1);
-			  break;
-		  }
-		  case 4:
-		  {
-			  uprintf("[S4] read  slave=02 start=0   qty=1\r\n");
-			  req_len = mb_master_build_read(g_req, sizeof(g_req), 0x02, 0, 1);
-			  break;
-		  }
-		  default:
-			  g_step = 0;
-			  continue;
-	  }
-	  if(req_len == 0)
-		  uprintf("[S%u] build failed\r\n", g_step);
-	  else
-	  {
-		  /* ---- TX 回显 ---- */
-		  uprintf("[S%u] TX:", g_step);
-		  for(uint16_t i = 0; i< req_len; i++)
-				uprintf("%02X",g_req[i]);
-		  /* ---- 2) 收发 + 计时 ---- */
-		  time_start = HAL_GetTick();
-		  e = mb_port_transfer(g_req, req_len, g_rsp, sizeof(g_rsp), &rsp_len, 200);
-		  time_end = HAL_GetTick() - time_start;
-		  /* ---- 3) 解析 + 打印 ---- */
-		  if(e != MB_M_OK)
-			  /* 收发就失败：超时 / 缓冲不够 / 参数错 */
-            uprintf("[S%u] %s  %lums\r\n", g_step, mb_m_err_str(e), time_end);
-		  else
-		  {
-			  uprintf("[S%u] RX:", g_step);
-			  for(uint16_t i = 0; i < rsp_len; i++)
-					uprintf("%02X",g_rsp[i]);
-			  uprintf("\r\n");
-			  
-			  e = mb_master_parse(g_req, req_len, g_rsp, rsp_len, g_out, sizeof(g_out) / sizeof(g_out[0]), &out_n, &exc);
-			   
-			  if (e == MB_M_OK) {
-                uprintf("[S%u] OK  %lums    ", g_step, time_end);
-                for (uint16_t i = 0; i < out_n; i++) {
-                    uprintf("reg[%u]=%u ", i, g_out[i]);
-                }
-                uprintf("\r\n");
-            } else if (e == MB_M_EXCEPTION) {
-                uprintf("[S%u] EXC %lums    slave exception: 0x%02X\r\n",
-                        g_step, time_end, exc);
-            } else {
-                uprintf("[S%u] %s  %lums\r\n", g_step, mb_m_err_str(e), time_end);
-            }
-		  }
-	  }
-	  /* ---- 4) 下一轮 ---- */
-	  g_step = (uint8_t)((g_step + 1u) % 5u);
-      HAL_Delay(500);
+
   }
   /* USER CODE END 3 */
 }
@@ -270,6 +173,28 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
