@@ -101,13 +101,6 @@ static void uprintf_raw(const char *s)
    HAL_UART_Transmit(&huart1,(uint8_t *)s,(uint16_t)strlen(s),100);
 }
 /* USER CODE END Variables */
-/* Definitions for defaultTask */
-osThreadId_t defaultTaskHandle;
-const osThreadAttr_t defaultTask_attributes = {
-  .name = "defaultTask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
-};
 /* Definitions for taskModbus */
 osThreadId_t taskModbusHandle;
 const osThreadAttr_t taskModbus_attributes = {
@@ -135,7 +128,6 @@ const osThreadAttr_t taskLed_attributes = {
 
 /* USER CODE END FunctionPrototypes */
 
-void StartDefaultTask(void *argument);
 void StartTaskModbus(void *argument);
 void StartTaskReport(void *argument);
 void StartTaskLed(void *argument);
@@ -207,9 +199,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
-  /* creation of defaultTask */
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-
   /* creation of taskModbus */
   taskModbusHandle = osThreadNew(StartTaskModbus, NULL, &taskModbus_attributes);
 
@@ -227,24 +216,6 @@ void MX_FREERTOS_Init(void) {
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
 
-}
-
-/* USER CODE BEGIN Header_StartDefaultTask */
-/**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
-{
-  /* USER CODE BEGIN StartDefaultTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartDefaultTask */
 }
 
 /* USER CODE BEGIN Header_StartTaskModbus */
