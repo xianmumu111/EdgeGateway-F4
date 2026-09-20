@@ -165,6 +165,15 @@ standard names. */
 #define USE_CUSTOM_SYSTICK_HANDLER_IMPLEMENTATION 0
 
 /* USER CODE BEGIN Defines */
+#define configGENERATE_RUN_TIME_STATS            1  //让 FreeRTOS 为每个任务维护一个「累计运行时间」字段
+#define configUSE_STATS_FORMATTING_FUNCTIONS     1  //使能 vTaskGetRunTimeStats() 和 vTaskList() 两个函数
+
+extern void     vConfigureTimerForRunTimeStats(void);
+extern uint32_t ulGetRunTimeCounterValue(void);
+
+#define portCONFIGURE_TIMER_FOR_RUN_TIME_STATS()  vConfigureTimerForRunTimeStats()
+#define portGET_RUN_TIME_COUNTER_VALUE()          ulGetRunTimeCounterValue()
+
 /* Section where parameter definitions can be added (for instance, to override default ones in FreeRTOS.h) */
 /* USER CODE END Defines */
 

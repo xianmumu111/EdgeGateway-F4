@@ -1,6 +1,8 @@
+#include "main.h"
 #include "modbus_slave.h"
 #include "usart.h"
 #include <string.h>
+#include "dwt_us.h"
 
 /* =========================================================================
  * 调试开关
@@ -30,20 +32,20 @@
  *   改波特率时记得同步改这个宏，否则 9600 下会卡在边界上误判帧结束。
  * ========================================================================= */
 #ifndef MODBUS_BAUD
-#define MODBUS_BAUD  9600
+#define MODBUS_BAUD  115200
 #endif
 
 #if MODBUS_BAUD > 19200
-#define MODBUS_T35_MS  2
+#define MODBUS_T35_US  1750UL
 #else
-#define MODBUS_T35_MS  ((35000UL / MODBUS_BAUD) + 1)
+#define MODBUS_T35_US  ((35000000UL + MODBUS_BAUD - 1UL) / MODBUS_BAUD)
 #endif
 
 #define MODBUS_BUF_SIZE 256
 
 static uint8_t           rx_buf[MODBUS_BUF_SIZE];
 static volatile uint16_t rx_len = 0;
-static volatile uint32_t last_rx_tick = 0;
+static volatile uint32_t last_rx_us = 0;
 
 static uint8_t  frame[MODBUS_BUF_SIZE];   /* 主循环里的帧快照，见 modbus_poll 临界区 */
 static uint16_t frame_len = 0;
@@ -88,7 +90,7 @@ void modbus_init(void)
 {
     rx_len = 0;
     frame_len = 0;
-    last_rx_tick = 0;
+    last_rx_us = 0;
 }
 
 /* 在 USART1 接收中断里被调用（每来一个字节调一次） */
@@ -102,7 +104,7 @@ void modbus_rx_byte(uint8_t byte)
     {
         rx_len = 0;   /* 缓冲溢出：整帧作废，从头再来，不能让 rx_len 卡死在 256 */
     }
-    last_rx_tick = HAL_GetTick();
+    last_rx_us = dwt_us();
 }
 
 /* 在主循环里被反复调用 */
@@ -122,7 +124,7 @@ void modbus_poll(void)
      * ---------------------------------------------- */
     __disable_irq();
 
-    if((uint32_t)(HAL_GetTick() - last_rx_tick) < MODBUS_T35_MS)
+    if((dwt_elapsed_us(last_rx_us)) < MODBUS_T35_US)
     {
         __enable_irq();          /* 还没静默够，帧没收完，下次再来 */
         return;

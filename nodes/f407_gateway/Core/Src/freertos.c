@@ -30,6 +30,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include "dwt_us.h"
+#include "tim.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -56,7 +58,7 @@ typedef struct {
     uint16_t start_reg_addr;   /* 本次访问的起始寄存器地址 */
     mb_m_err_t error;          /* MB_M_OK / MB_M_EXCEPTION / MB_M_TIMEOUT ... */
     uint8_t  exception_code;   /* 从站异常码，仅 error == MB_M_EXCEPTION 时有效 */
-    uint32_t elapsed_ms;       /* 本步耗时，单位 ms */
+    uint32_t elapsed_us;       /* 本步耗时，单位 ms */
 
     uint8_t  tx_len;
     uint8_t  rx_len;
@@ -92,7 +94,12 @@ static uint32_t s_dropped = 0;	/* 队列满被丢掉的条数 */
         HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
     }
  }
- 
+
+/* 绕过 vsnprintf 的裸打印，专给 run-time stats 用（输出 200+ 字节） */
+static void uprintf_raw(const char *s)
+{
+   HAL_UART_Transmit(&huart1,(uint8_t *)s,(uint16_t)strlen(s),100);
+}
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
@@ -152,6 +159,15 @@ void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName)
 	while(1)
 	{}
 }
+void vConfigureTimerForRunTimeStats(void)
+{
+   __HAL_TIM_SET_COUNTER(&htim2, 0);
+    HAL_TIM_Base_Start(&htim2);  
+}
+uint32_t ulGetRunTimeCounterValue(void)
+{
+  return __HAL_TIM_GET_COUNTER(&htim2);
+}
 /* USER CODE END 4 */
 
 /**
@@ -161,6 +177,7 @@ void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName)
   */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
+  dwt_init();   //初始化 DWT 周期计数器
 	s_q_sample = osMessageQueueNew(8U, sizeof(mb_m_transaction_t), NULL);  // 创建一个消息队列，最多存放 8 条 mb_sample_t 类型的消息
   if(s_q_sample == NULL)
   {
@@ -252,7 +269,7 @@ void StartTaskModbus(void *argument)
     uint16_t out[8];
     uint8_t exc = 0;
     mb_m_err_t e;
-    uint32_t ms = 0;
+    uint32_t us = 0;
 
     memset(&s, 0, sizeof(s));   //
     s.step_index = (uint8_t)step;
@@ -302,9 +319,9 @@ void StartTaskModbus(void *argument)
     s.tx_len = (uint8_t)req_len;
 
     /* 收发+计时*/
-    ms = HAL_GetTick();
+    us = dwt_us();
     e = mb_port_transfer(s.tx_buf,s.tx_len,s.rx_buf,sizeof(s.rx_buf),&rsp_len,200);
-    s.elapsed_ms = HAL_GetTick() - ms;
+    s.elapsed_us = dwt_elapsed_us(us);
     if(e == MB_M_OK || e == MB_M_EXCEPTION)
     s.rx_len = (uint8_t)rsp_len;
     else
@@ -352,6 +369,8 @@ void StartTaskReport(void *argument)
   /* USER CODE BEGIN StartTaskReport */
   (void)argument;
   mb_m_transaction_t s;
+  static uint32_t s_report_conut = 0;
+  static char s_stats_buf[512];
   /* Infinite loop */
   while(1)
   {
@@ -363,6 +382,21 @@ void StartTaskReport(void *argument)
     if(osMessageQueueGet(s_q_sample,&s,NULL,osWaitForever) != osOK)
     {
       continue;
+    }
+    s_report_conut++;
+    if((s_report_conut % 20U) == 0U)
+    {
+      uprintf("[STAT] stack hwm (words): modbus=%lu report=%lu led=%lu\r\n",
+                (unsigned long)uxTaskGetStackHighWaterMark(taskModbusHandle),
+                (unsigned long)uxTaskGetStackHighWaterMark(taskReportHandle),
+                (unsigned long)uxTaskGetStackHighWaterMark(taskLedHandle));
+    }
+
+    if((s_report_conut % 20U) == 0U)
+    {
+      vTaskGetRunTimeStats(s_stats_buf);
+      uprintf_raw(s_stats_buf);
+      uprintf_raw("\r\n");
     }
 
     switch (s.step_index) {
@@ -381,6 +415,7 @@ void StartTaskReport(void *argument)
         case 3:
             uprintf("[RPT][S3] read  slave=%02X start=%u qty=1 (expect exception)\r\n",
                     (unsigned)s.slave_id, (unsigned)s.start_reg_addr);
+            break;
         case 4:
             uprintf("[RPT][S4] read  slave=%02X start=%u qty=1 (expect timeout)\r\n",
                     (unsigned)s.slave_id, (unsigned)s.start_reg_addr);
@@ -395,6 +430,7 @@ void StartTaskReport(void *argument)
         {
           uprintf(" %02X", s.tx_buf[i]);          
         }
+        uprintf("\r\n"); 
         /* 按 s.err 分三种情况打印 */
         if (s.error == MB_M_OK) {
             uprintf("[RPT][S%u] RX:", (unsigned)s.step_index);
@@ -403,8 +439,8 @@ void StartTaskReport(void *argument)
             }
             uprintf("\r\n");
 
-            uprintf("[RPT][S%u] OK  %lums",
-                    (unsigned)s.step_index, (unsigned long)s.elapsed_ms);
+            uprintf("[RPT][S%u] OK  %luus",
+                    (unsigned)s.step_index, (unsigned long)s.elapsed_us);
             for (uint16_t i = 0; i < s.reg_count; i++) {
                 uprintf(" reg[%u]=%u", (unsigned)i, (unsigned)s.reg_values[i]);
             }
@@ -417,14 +453,14 @@ void StartTaskReport(void *argument)
             }
             uprintf("\r\n");
 
-            uprintf("[RPT][S%u] EXC %lums slave exception: 0x%02X\r\n",
-                    (unsigned)s.step_index, (unsigned long)s.elapsed_ms, (unsigned)s.exception_code);
+            uprintf("[RPT][S%u] EXC %luus slave exception: 0x%02X\r\n",
+                    (unsigned)s.step_index, (unsigned long)s.elapsed_us, (unsigned)s.exception_code);
         }
         else {
             /* 超时/CRC 等：不打 RX 字节，避免垃圾。 */
             /* mb_m_err_str 若不存在，改成 (int)s.err 或你自己的错误字符串函数 */
-            uprintf("[RPT][S%u] %s %lums\r\n",
-                    (unsigned)s.step_index, mb_m_err_str(s.error), (unsigned long)s.elapsed_ms);
+            uprintf("[RPT][S%u] %s %luus\r\n",
+                    (unsigned)s.step_index, mb_m_err_str(s.error), (unsigned long)s.elapsed_us);
         }
 
         /* TODO-7：留一行注释占位 */

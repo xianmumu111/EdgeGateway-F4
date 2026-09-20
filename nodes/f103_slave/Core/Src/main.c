@@ -26,6 +26,7 @@
 #include "stdio.h"
 #include "stdint.h"
 #include "modbus_slave.h"
+#include "dwt_us.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -111,6 +112,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   modbus_init();
   HAL_UART_Receive_IT(&huart1, &rx_byte, 1);
+  dwt_init();
   /* USER CODE END 2 */
 
   /* Infinite loop */

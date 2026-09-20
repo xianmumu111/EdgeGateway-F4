@@ -167,9 +167,16 @@ CMSIS 里 M3 的 `CoreDebug` / `DWT` 结构体也在，`__STATIC_INLINE` 一样�
 #if MODBUS_BAUD > 19200
 #define MODBUS_T35_US  1750UL        /* 规范固定值，不再写 2ms */
 #else
-#define MODBUS_T35_US  ((35000000UL / MODBUS_BAUD) + 999UL)  /* 向上取整到 µs */
+/* 35000000 / baud，向上取整到 µs：分子先加 (baud-1) 再除 */
+#define MODBUS_T35_US  ((35000000UL + MODBUS_BAUD - 1UL) / MODBUS_BAUD)
 #endif
 ```
+
+> ⚠️ **我第一版写错了，你改对了，记一笔**：
+> 我原来写的是 `((35000000UL / MODBUS_BAUD) + 999UL)` —— 那是"向上取整到**毫秒**"的写法，
+> 套在 µs 上会得到 911+999 = **1910µs**，比规范值凭空多 1000µs。
+> 正确的整数向上取整是 `(a + b - 1) / b`，不是 `a/b + 常数`。
+> （幸好 38400 走的是 >19200 分支，这个错误没影响今天的结果 —— **没跑到的代码里的 bug 不算 bug，但它迟早会跑到**。）
 
 > **对比一下老写法**：`(35000UL / MODBUS_BAUD) + 1` 毫秒。
 > 9600bps 下：老写法 = 3+1 = **4ms**；规范值其实是 3.6458ms → 新写法 **3646µs**。
